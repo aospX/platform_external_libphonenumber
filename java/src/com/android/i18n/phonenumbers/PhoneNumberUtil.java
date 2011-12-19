@@ -607,7 +607,7 @@ public class PhoneNumberUtil {
   private void loadMetadataForRegionFromFile(String filePrefix, String regionCode) {
     InputStream source =
         PhoneNumberUtil.class.getResourceAsStream(filePrefix + "_" + regionCode);
-    ObjectInputStream in;
+    ObjectInputStream in = null;
     try {
       in = new ObjectInputStream(source);
       PhoneMetadataCollection metadataCollection = new PhoneMetadataCollection();
@@ -617,6 +617,18 @@ public class PhoneNumberUtil {
       }
     } catch (IOException e) {
       LOGGER.log(Level.WARNING, e.toString());
+    } finally {
+      close(in);
+    }
+  }
+
+  private void close(InputStream in) {
+    if (in != null) {
+      try {
+        in.close();
+      } catch (IOException e) {
+        LOGGER.log(Level.WARNING, e.toString());
+      }
     }
   }
 
@@ -1225,23 +1237,51 @@ public class PhoneNumberUtil {
    * @return  the formatted phone number in its original number format
    */
   public String formatInOriginalFormat(PhoneNumber number, String regionCallingFrom) {
-    if (number.hasRawInput() && !isValidNumber(number)) {
+    if (number.hasRawInput() &&
+        (!hasFormattingPatternForNumber(number) || !isValidNumber(number))) {
+      // We check if we have the formatting pattern because without that, we might format the number
+      // as a group without national prefix. We also want to check the validity of the number
+      // because we don't want to risk formatting the number if we don't really understand it.
       return number.getRawInput();
     }
     if (!number.hasCountryCodeSource()) {
       return format(number, PhoneNumberFormat.NATIONAL);
     }
+    String formattedNumber;
     switch (number.getCountryCodeSource()) {
       case FROM_NUMBER_WITH_PLUS_SIGN:
-        return format(number, PhoneNumberFormat.INTERNATIONAL);
+        formattedNumber = format(number, PhoneNumberFormat.INTERNATIONAL);
+        break;
       case FROM_NUMBER_WITH_IDD:
-        return formatOutOfCountryCallingNumber(number, regionCallingFrom);
+        formattedNumber = formatOutOfCountryCallingNumber(number, regionCallingFrom);
+        break;
       case FROM_NUMBER_WITHOUT_PLUS_SIGN:
-        return format(number, PhoneNumberFormat.INTERNATIONAL).substring(1);
+        formattedNumber = format(number, PhoneNumberFormat.INTERNATIONAL).substring(1);
+        break;
       case FROM_DEFAULT_COUNTRY:
       default:
-        return format(number, PhoneNumberFormat.NATIONAL);
+        formattedNumber = format(number, PhoneNumberFormat.NATIONAL);
+        break;
     }
+    String rawInput = number.getRawInput();
+    // If no digit is inserted/removed/modified as a result of our formatting, we return the
+    // formatted phone number; otherwise we return the raw input the user entered.
+    return (formattedNumber != null &&
+            normalizeDigitsOnly(formattedNumber).equals(normalizeDigitsOnly(rawInput)))
+        ? formattedNumber
+        : rawInput;
+  }
+
+  private boolean hasFormattingPatternForNumber(PhoneNumber number) {
+    String phoneNumberRegion = getRegionCodeForCountryCode(number.getCountryCode());
+    PhoneMetadata metadata = getMetadataForRegion(phoneNumberRegion);
+    if (metadata == null) {
+      return false;
+    }
+    String nationalNumber = getNationalSignificantNumber(number);
+    NumberFormat formatRule =
+        chooseFormattingPatternForNumber(metadata.numberFormats(), nationalNumber);
+    return formatRule != null;
   }
 
   /**
@@ -1352,18 +1392,8 @@ public class PhoneNumberUtil {
    * @return  the national significant number of the PhoneNumber object passed in
    */
   public String getNationalSignificantNumber(PhoneNumber number) {
-    // The leading zero in the national (significant) number of an Italian phone number has a
-    // special meaning. Unlike the rest of the world, it indicates the number is a landline
-    // number. There have been plans to migrate landline numbers to start with the digit two since
-    // December 2000, but it has not yet happened.
-    // See http://en.wikipedia.org/wiki/%2B39 for more details.
-    // Other regions such as Cote d'Ivoire and Gabon use this for their mobile numbers.
-    StringBuilder nationalNumber = new StringBuilder(
-        (number.hasItalianLeadingZero() &&
-         number.isItalianLeadingZero() &&
-         isLeadingZeroPossible(number.getCountryCode()))
-        ? "0" : ""
-    );
+    // If a leading zero has been set, we prefix this now. Note this is not a national prefix.
+    StringBuilder nationalNumber = new StringBuilder(number.isItalianLeadingZero() ? "0" : "");
     nationalNumber.append(number.getNationalNumber());
     return nationalNumber.toString();
   }
@@ -1420,6 +1450,22 @@ public class PhoneNumberUtil {
           SEPARATOR_PATTERN.matcher(formattedNationalNumber).replaceAll("-");
     }
     return formattedNationalNumber;
+  }
+
+  private NumberFormat chooseFormattingPatternForNumber(List<NumberFormat> availableFormats,
+                                                        String nationalNumber) {
+    for (NumberFormat numFormat : availableFormats) {
+      int size = numFormat.leadingDigitsPatternSize();
+      if (size == 0 || regexCache.getPatternForRegex(
+              // We always use the last leading_digits_pattern, as it is the most detailed.
+              numFormat.getLeadingDigitsPattern(size - 1)).matcher(nationalNumber).lookingAt()) {
+        Matcher m = regexCache.getPatternForRegex(numFormat.getPattern()).matcher(nationalNumber);
+        if (m.matches()) {
+          return numFormat;
+        }
+      }
+    }
+    return null;
   }
 
   // Simple wrapper of formatAccordingToFormats for the common case of no carrier code.
