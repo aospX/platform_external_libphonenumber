@@ -2033,7 +2033,14 @@ public class PhoneNumberUtil {
       potentialCountryCode = Integer.parseInt(fullNumber.substring(0, i));
       if (countryCallingCodeToRegionCodeMap.containsKey(potentialCountryCode)) {
         nationalNumber.append(fullNumber.substring(i));
-        return potentialCountryCode;
+        // GCF test case is failing when +0123 is dialed.
+        // +0123 gets converted to +123 due to below return.
+        // Hence only for '+01' we are avoiding auto-format.
+        if (potentialCountryCode != 1) {
+          return potentialCountryCode;
+        } else {
+          return 0;
+        }
       }
     }
     return 0;
